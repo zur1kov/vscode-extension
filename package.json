@@ -14,8 +14,8 @@
   "contributes": {
     "commands": [
       {
-        "command": "cp-test-runner.helloWorld",
-        "title": "Hello World"
+        "command": "cp-test-runner.runTests",
+        "title": "Run tests"
       }
     ]
   },
