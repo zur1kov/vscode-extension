@@ -120,6 +120,7 @@ async function compile(sourcePath: string): Promise<CompileResult> {
 
 async function runTests(output: vscode.OutputChannel) {
 	const editor = vscode.window.activeTextEditor;
+	output.appendLine('===============');
 	output.appendLine('Running tests...');
 
 	if (undefined == editor) {
@@ -171,7 +172,8 @@ async function runTests(output: vscode.OutputChannel) {
 
 async function createTests(output: vscode.OutputChannel) {
 	const editor = vscode.window.activeTextEditor;
-	output.appendLine('Running tests...');
+	output.appendLine('===============');
+	output.appendLine('Creating tests...');
 
 	if (undefined == editor) {
 		vscode.window.showErrorMessage("No active editor for tests");
