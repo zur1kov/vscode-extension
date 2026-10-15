@@ -16,6 +16,10 @@
       {
         "command": "cp-test-runner.runTests",
         "title": "Run tests"
+      },
+      {
+        "command": "cp-test-runner.createTests",
+        "title": "Create tests"
       }
     ]
   },

@@ -1,7 +1,7 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
-import { execFile } from 'child_process';
+import { execFile, ExecFileException } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -9,6 +9,7 @@ import * as fs from 'fs';
 const execFileAsync = promisify(execFile);
 
 type Test = {
+	name: string;
 	inputFile: string;
 	outputFile: string;
 }
@@ -28,7 +29,14 @@ type GetTestResult = {
 	error: string
 };
 
-async function getTests(sourcePath: string): Promise<GetTestResult> {
+type CreateTestResult = {
+	ok: true;
+} | {
+	ok: false;
+	error: string
+};
+
+async function getTests(sourcePath: string, outExists: boolean = true): Promise<GetTestResult> {
 	let testsPath = path.join(path.dirname(sourcePath), "tests");
 	if (!fs.existsSync(testsPath)) {
 		return { ok: false, error: "tests folder doesn't exist" }
@@ -40,8 +48,9 @@ async function getTests(sourcePath: string): Promise<GetTestResult> {
 		if (files[i].endsWith('.in')) {
 			let inFile = path.join(testsPath, files[i]);
 			let outFile = path.join(testsPath, String(path.parse(files[i]).name) + ".out");
-			if (fs.existsSync(outFile)) {
+			if (!outExists || fs.existsSync(outFile)) {
 				tests.push({
+					name: String(path.parse(files[i]).name),
 					inputFile: inFile,
 					outputFile: outFile
 				});
@@ -51,10 +60,43 @@ async function getTests(sourcePath: string): Promise<GetTestResult> {
 	return { ok: true, tests: tests };
 }
 
-function runTest(test: Test): string {
-	if (!test) return "WA";
+async function runTest(binFilename: string, test: Test): Promise<string> {
+	const p = execFileAsync(binFilename, { timeout: 3000 });
+	try {
+		const input = await fs.promises.readFile(test.inputFile, 'utf-8');
+		const output = await fs.promises.readFile(test.outputFile, 'utf-8');
+		p.child.stdin?.end(input);
+		const { stdout } = await p;
+		if (stdout != output) {
+			return "WA";
+		}
+	} catch (e) {
+		if ((e as ExecFileException).killed) {
+			return "TL";
+		}
+		return "RE";
+	}
 
 	return "OK";
+}
+
+async function createTest(binFilename: string,
+	test: Test): Promise<CreateTestResult> {
+	const p = execFileAsync(binFilename, { timeout: 3000 });
+	try {
+		const input = await fs.promises.readFile(test.inputFile, 'utf-8');
+		p.child.stdin?.end(input);
+		const { stdout } = await p;
+		await fs.promises.writeFile(test.outputFile, stdout, 'utf-8')
+	} catch (e) {
+		return {
+			ok: false,
+			error: (e as Error).message
+		}
+	}
+
+
+	return { ok: true }
 }
 
 async function compile(sourcePath: string): Promise<CompileResult> {
@@ -62,7 +104,7 @@ async function compile(sourcePath: string): Promise<CompileResult> {
 	let cppFilename = path.join(path.dirname(sourcePath), path.parse(sourcePath).name) + ".cpp";
 
 	try {
-		await execFileAsync("g++", [cppFilename, "-O2", "-std=c++17", "-o", binFilename]);
+		await execFileAsync("g++", [cppFilename, "-std=c++17", "-o", binFilename]);
 		return {
 			"ok": true,
 			"binary": binFilename
@@ -76,71 +118,122 @@ async function compile(sourcePath: string): Promise<CompileResult> {
 
 }
 
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
+async function runTests(output: vscode.OutputChannel) {
+	const editor = vscode.window.activeTextEditor;
+	output.appendLine('Running tests...');
+
+	if (undefined == editor) {
+		vscode.window.showErrorMessage("No active editor for tests");
+		return;
+	}
+	output.appendLine(`Proccessing file ${editor.document.fileName}`);
+	if (editor.document.languageId !== "cpp") {
+		vscode.window.showErrorMessage("Provided file is not C++ file");
+		return;
+	}
+
+	let compileResult = await compile(editor.document.fileName);
+	if (!compileResult.ok) {
+		vscode.window.showErrorMessage("Error: " + String(compileResult.error));
+		output.appendLine("Error: " + String(compileResult.error));
+		output.show();
+		return;
+	} else {
+		output.appendLine("Compiled successfully");
+		output.show();
+	}
+	const testsResult = await getTests(editor.document.fileName);
+	if (!testsResult.ok) {
+		vscode.window.showErrorMessage("Error: " + String(testsResult.error));
+		output.appendLine("Error: " + String(testsResult.error));
+		output.show();
+		return;
+	}
+	const tests = testsResult.tests;
+	if (!tests.length) {
+		output.appendLine("No tests provided");
+		output.show();
+		vscode.window.showErrorMessage("No tests provided");
+		return;
+	}
+
+	let successTests = 0;
+	for (let i = 0; i < tests.length; i++) {
+		const test = tests[i];
+		const verdict = await runTest(compileResult.binary, test);
+		if (verdict === "OK") successTests++;
+		output.appendLine(`Test ${test.name}: [${verdict}]`)
+	}
+
+	output.appendLine(`${successTests}/${tests.length} tests passed.`);
+	output.show();
+}
+
+async function createTests(output: vscode.OutputChannel) {
+	const editor = vscode.window.activeTextEditor;
+	output.appendLine('Running tests...');
+
+	if (undefined == editor) {
+		vscode.window.showErrorMessage("No active editor for tests");
+		return;
+	}
+	output.appendLine(`Proccessing file ${editor.document.fileName}`);
+	if (editor.document.languageId !== "cpp") {
+		vscode.window.showErrorMessage("Provided file is not C++ file");
+		return;
+	}
+
+	let compileResult = await compile(editor.document.fileName);
+	if (!compileResult.ok) {
+		vscode.window.showErrorMessage("Error: " + String(compileResult.error));
+		output.appendLine("Error: " + String(compileResult.error));
+		output.show();
+		return;
+	} else {
+		output.appendLine("Compiled successfully");
+		output.show();
+	}
+	const testsResult = await getTests(editor.document.fileName, false);
+	if (!testsResult.ok) {
+		vscode.window.showErrorMessage("Error: " + String(testsResult.error));
+		output.appendLine("Error: " + String(testsResult.error));
+		output.show();
+		return;
+	}
+	const tests = testsResult.tests;
+	if (!tests.length) {
+		output.appendLine("No tests provided");
+		output.show();
+		vscode.window.showErrorMessage("No tests provided");
+		return;
+	}
+
+	for (let i = 0; i < tests.length; i++) {
+		let res = await createTest(compileResult.binary, tests[i]);
+		if (!res.ok) {
+			output.appendLine(`Error: ${res.error}`);
+			output.show();
+			return;
+		}
+	}
+
+	output.appendLine('Tests created succesfully');
+	output.show();
+}
+
 export function activate(context: vscode.ExtensionContext) {
 	console.log('CP test runner is active');
 	const output = vscode.window.createOutputChannel("CP Test Runner");
 
-	const disposable = vscode.commands.registerCommand('cp-test-runner.runTests', async () => {
-		const editor = vscode.window.activeTextEditor;
-		output.appendLine('Running tests...');
-
-		if (undefined == editor) {
-			vscode.window.showErrorMessage("No active editor for tests");
-			return;
-		}
-		output.appendLine(`Proccessing file ${editor.document.fileName}`);
-		if (editor.document.languageId !== "cpp") {
-			vscode.window.showErrorMessage("Provided file is not C++ file");
-			return;
-		}
-
-		let compileResult = await compile(editor.document.fileName);
-		if (!compileResult.ok) {
-			vscode.window.showErrorMessage("Error: " + String(compileResult.error));
-			output.appendLine("Error: " + String(compileResult.error));
-			output.show();
-			return;
-		} else {
-			output.appendLine("Compiled successfully");
-			output.show();
-		}
-		const testsResult = await getTests(editor.document.fileName);
-		if (!testsResult.ok) {
-			vscode.window.showErrorMessage("Error: " + String(testsResult.error));
-			output.appendLine("Error: " + String(testsResult.error));
-			output.show();
-			return;
-		}
-		const tests = testsResult.tests;
-		if (!tests.length) {
-			output.appendLine("No tests provided");
-			output.show();
-			vscode.window.showErrorMessage("No tests provided");
-			return;
-		}
-
-		let successTests = 0;
-		for (let i = 0; i < tests.length; i++) {
-			const test = tests[i];
-			const verdict = runTest(test);
-			if (verdict !== "OK") {
-				output.appendLine(`Error ${verdict} in test ${i + 1}`);
-				output.show();
-			} else {
-				output.appendLine(`Test ${i + 1} passed succesfully`);
-				output.show();
-				successTests++;
-			}
-		}
-
-		output.appendLine(`${successTests}/${tests.length} tests passed.`);
-		output.show();
-
+	const run_tests_command = vscode.commands.registerCommand('cp-test-runner.runTests', async () => {
+		await runTests(output);
+	});
+	const create_tests_command = vscode.commands.registerCommand('cp-test-runner.createTests', async () => {
+		await createTests(output);
 	});
 
-	context.subscriptions.push(disposable, output);
+	context.subscriptions.push(run_tests_command, create_tests_command, output);
+
 }
 
 // This method is called when your extension is deactivated
